@@ -24,30 +24,49 @@ node {
   stash name: 'app', includes: "target/${artefactName}"
   stash name: 'dockerfile', includes: "Dockerfile"
   stash name: 'config', includes: "hello-world.yml"
-
-  stage 'Integration Tests'
-  sh "${mvnHome}/bin/mvn verify"
+  stash name: 'pom', includes: 'pom.xml'
+  stash name: 'target', includes: "target/**/*"
 }
 
-node('docker'){
-  stage 'Docker build'
-  unstash 'config'
-  unstash 'dockerfile'
-  unstash 'app'
-  dockerImage = "demo-app:${short_commit}"
-  image = docker.build("${dockerImage}")
-  docker.withRegistry('http://localhost:5000', '') {
-    image.push("${short_commit}")
-  }
+parallel (
+  integrationtests: {
+   stage('Integration Tests') {
+    node {
+      unstash 'pom'
+      unstash 'target'
+      def mvnHome = tool name: 'maven3', type: 'hudson.tasks.Maven$MavenInstallation'
+      sh "${mvnHome}/bin/mvn verify"
+    }
+   }
+  },
+  dockersmoketest: {
+   stage('Docker build') {
+    node('docker'){
+      unstash 'config'
+      unstash 'dockerfile'
+      unstash 'app'
+      dockerImage = "demo-app:${short_commit}"
+      image = docker.build("${dockerImage}")
+      docker.withRegistry('http://localhost:5000', '') {
+        image.push("${short_commit}")
+      }
 
+      stage('Smoke Test') {
+        container = image.run()
+        container.stop()
+      }
+    }
+   }
+  }
+)
+
+node('docker') {
   stage 'Launching Docker image for manual validation'
   container = image.run('-P')
   sh "docker port ${container.id} 8080 | cut -d':' -f2 > EXPOSED_PORT"
   exposed_port = readFile('EXPOSED_PORT').trim()
   sh 'rm EXPOSED_PORT'
-
 }
-
 
 try {
   timeout(time:5, unit:'DAYS') {
